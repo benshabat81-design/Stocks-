@@ -1,10 +1,12 @@
 # Stock Tracker Pro 📈
 
-אפליקציית שולחן עבודה מקצועית למעקב תיק מניות (Wall Street – NYSE/NASDAQ),
-כתובה ב‑Python + Tkinter. כל הנתונים מוזנים **ידנית** – ללא APIs חיצוניים.
+אפליקציית מעקב תיק מניות מקצועית (Wall Street – NYSE/NASDAQ). כל הנתונים מוזנים **ידנית** – ללא APIs חיצוניים.
+זמינה בשתי גרסאות:
 
-A professional desktop stock portfolio tracker built with Python + Tkinter.
-All data is entered manually – no external APIs. UI is in Hebrew (RTL) with a dark theme.
+- **🖥️ גרסת שולחן עבודה** (`stock_tracker.py`) – Python + Tkinter, רצה כחלון על המחשב.
+- **🌐 גרסת Web** (`stock_tracker_web.py`) – Python + Streamlit, נפתחת בדפדפן – גם במחשב וגם **בטלפון**.
+
+שתי הגרסאות חולקות את אותם קבצי נתונים (JSON), כך שאפשר לעבור ביניהן.
 
 ## תכונות (Features)
 
@@ -14,19 +16,34 @@ All data is entered manually – no external APIs. UI is in Hebrew (RTL) with a 
 - **📒 יומן מסחר** – תיעוד עסקאות, סטטיסטיקות (Win Rate, ממוצע רווח, סימבולים נסחרים).
 - **📈 גרפים** – עוגת התפלגות תיק, עמודות רווח/הפסד, וגרף שווי תיק לאורך זמן.
 
-## דרישות (Requirements)
+## הרצה — גרסת שולחן עבודה (Desktop)
 
 ```bash
 pip install matplotlib pandas
+python stock_tracker.py
 ```
 
 `tkinter` מגיע בדרך כלל עם Python (בלינוקס: `sudo apt install python3-tk`).
 
-## הרצה (Run)
+## הרצה — גרסת Web (לרבות מהטלפון)
 
 ```bash
-python stock_tracker.py
+pip install -r requirements.txt
+streamlit run stock_tracker_web.py
 ```
+
+יתפתח דף בדפדפן (ברירת מחדל: http://localhost:8501).
+
+### גישה מהטלפון באותו WiFi
+כשהאפליקציה רצה, Streamlit מציג גם כתובת **Network URL** (למשל `http://192.168.1.20:8501`).
+הקלד אותה בדפדפן של הטלפון כשהוא מחובר לאותו WiFi כמו המחשב.
+> בווינדוז, אם זה לא נטען – אשר ל-Python גישה ברשת ב-Windows Firewall, או הרץ עם:
+> `streamlit run stock_tracker_web.py --server.address=0.0.0.0`
+
+### גישה מכל מקום (ענן חינמי)
+דחוף את הריפו ל-GitHub והעלה ל-[Streamlit Community Cloud](https://share.streamlit.io):
+בחר את הריפו, את הענף, וקובץ ראשי `stock_tracker_web.py`. תקבל קישור קבוע שנפתח בכל טלפון.
+> בענן הנתונים זמניים (filesystem ארעי); לשימוש אישי זה תקין, אך לא לאחסון לטווח ארוך.
 
 ## שמירת נתונים (Data)
 
