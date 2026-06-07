@@ -124,6 +124,56 @@ def num(x):
         return None
 
 
+def _fmt_cell(val):
+    """פורמט תא בטבלה: מספרים עם פסיקים, ריק -> מקף."""
+    if val is None:
+        return "-"
+    if isinstance(val, float):
+        if val != val:  # NaN
+            return "-"
+        if val == int(val):
+            return "{:,}".format(int(val))
+        return "{:,.2f}".format(val)
+    if isinstance(val, int):
+        return "{:,}".format(val)
+    s = str(val).strip()
+    return s if s else "-"
+
+
+def render_table(df, color_cols=()):
+    """
+    מצייר טבלה בעברית מימין-לשמאל (RTL), שמתאימה את עצמה לרוחב המסך
+    בלי גלילה אופקית. עמודות צבועות (רווח/הפסד) מקבלות ירוק/אדום.
+    """
+    cols = list(df.columns)
+    headers = "".join(
+        '<th style="padding:7px 4px; text-align:center; font-weight:bold;'
+        ' border-bottom:2px solid %s; word-wrap:break-word;">%s</th>' % (COLORS["bg"], c)
+        for c in cols
+    )
+    body = ""
+    for i, (_, row) in enumerate(df.iterrows()):
+        bg = COLORS["surface"] if i % 2 == 0 else COLORS["bg"]
+        cells = ""
+        for c in cols:
+            val = row[c]
+            style = "padding:6px 4px; text-align:center; border-bottom:1px solid %s; word-wrap:break-word;" % COLORS["bg"]
+            if c in color_cols and isinstance(val, (int, float)) and val == val:
+                clr = COLORS["green"] if val > 0 else (COLORS["red"] if val < 0 else COLORS["text"])
+                style += " color:%s; font-weight:bold;" % clr
+            cells += '<td style="%s">%s</td>' % (style, _fmt_cell(val))
+        body += '<tr style="background:%s;">%s</tr>' % (bg, cells)
+
+    html = (
+        '<div style="direction:rtl; width:100%; overflow-x:hidden;">'
+        '<table style="width:100%; border-collapse:collapse; direction:rtl;'
+        f' table-layout:fixed; font-size:12px; color:{COLORS["text"]};">'
+        f'<thead><tr style="background:{COLORS["accent"]}; color:white;">{headers}</tr></thead>'
+        f'<tbody>{body}</tbody></table></div>'
+    )
+    st.markdown(html, unsafe_allow_html=True)
+
+
 # ===================================================================
 #  מודול 1: תיק מניות
 # ===================================================================
@@ -205,13 +255,7 @@ def tab_portfolio():
                 "משקל %": round(weight, 2),
             })
         df = pd.DataFrame(rows)
-
-        def color_pnl(v):
-            color = COLORS["green"] if v > 0 else (COLORS["red"] if v < 0 else COLORS["text"])
-            return "color: %s" % color
-
-        styled = df.style.map(color_pnl, subset=["רווח/הפסד $", "רווח/הפסד %"])
-        st.dataframe(styled, width="stretch", hide_index=True)
+        render_table(df, color_cols=["רווח/הפסד $", "רווח/הפסד %"])
     else:
         st.info("התיק ריק. הוסף פוזיציה כדי להתחיל.")
 
@@ -312,7 +356,7 @@ def tab_analysis():
             "המלצה": a.get("recommendation", ""),
             "יעד $": a.get("price_target"),
         } for a in st.session_state.analyses]
-        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+        render_table(pd.DataFrame(rows))
 
 
 # ===================================================================
@@ -385,7 +429,7 @@ def tab_journal():
             "יעד": t.get("target_price"), "סטופ": t.get("stop_loss"),
             "סטטוס": t["status"],
         } for t in jr]
-        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+        render_table(pd.DataFrame(rows))
         d1, d2 = st.columns([3, 1])
         idx = d1.selectbox("בחר עסקה למחיקה (לפי שורה)",
                            list(range(len(jr))),
