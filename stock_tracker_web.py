@@ -316,6 +316,128 @@ def render_table(df, color_cols=()):
 
 
 # ===================================================================
+#  סורק שוק (Market Scanner)
+# ===================================================================
+SECTOR_ETFS = {
+    "XLK": "טכנולוגיה", "XLF": "פיננסים", "XLE": "אנרגיה", "XLV": "בריאות",
+    "XLI": "תעשייה", "XLY": "צריכה מחזורית", "XLP": "צריכה בסיסית",
+    "XLB": "חומרים", "XLRE": "נדל\"ן", "XLU": "תשתיות", "XLC": "תקשורת",
+}
+DEFAULT_WATCHLIST = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META",
+                     "TSLA", "AMD", "NFLX", "AVGO"]
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def scan_sectors():
+    """מומנטום סקטורים: תשואות שבוע/חודש/3 חודשים ל-11 קרנות הסקטור."""
+    try:
+        d = yf.download(list(SECTOR_ETFS), period="6mo", progress=False)["Close"]
+    except Exception:
+        return None
+    rows = []
+    for etf, name in SECTOR_ETFS.items():
+        if etf not in d:
+            continue
+        s = d[etf].dropna()
+        if len(s) < 30:
+            continue
+        last = float(s.iloc[-1])
+
+        def ret(n):
+            return round((last / float(s.iloc[-n]) - 1) * 100, 2) if len(s) > n else None
+
+        rows.append({"סקטור": name, "ETF": etf, "שבוע %": ret(5),
+                     "חודש %": ret(21), "3 חודשים %": ret(63)})
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values("חודש %", ascending=False, na_position="last").reset_index(drop=True)
+    return df
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def scan_stocks(tickers):
+    """סורק סיגנלים על רשימת מעקב. מחזיר טבלה ממוינת לפי 'ציון' (0-5)."""
+    tickers = list(tickers)
+    try:
+        data = yf.download(tickers, period="1y", progress=False, group_by="ticker")
+    except Exception:
+        return None
+    if data is None or len(data) == 0:
+        return None
+    multi = isinstance(data.columns, pd.MultiIndex)
+    rows = []
+    for tk in tickers:
+        try:
+            df = data[tk] if multi else data
+            close = df["Close"].dropna()
+            vol = df["Volume"].dropna()
+            if len(close) < 60:
+                continue
+            price = float(close.iloc[-1])
+            ma50 = float(close.rolling(50).mean().iloc[-1])
+            ma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else None
+            r = _rsi(close)
+            high52 = float(close.tail(252).max())
+            from_high = (price / high52 - 1) * 100
+            avg_vol = float(vol.tail(20).mean())
+            vol_spike = (float(vol.iloc[-1]) / avg_vol) if avg_vol else None
+            score, flags = 0, []
+            if price > ma50:
+                score += 1; flags.append("מעל MA50")
+            if ma200 and price > ma200:
+                score += 1; flags.append("מעל MA200")
+            if r and 50 <= r <= 72:
+                score += 1; flags.append("RSI חיובי")
+            if from_high > -5:
+                score += 1; flags.append("קרוב לשיא")
+            if vol_spike and vol_spike > 1.5:
+                score += 1; flags.append("קפיצת נפח")
+            rows.append({
+                "טיקר": tk, "מחיר": round(price, 2), "ציון": score,
+                "מרחק משיא %": round(from_high, 1),
+                "RSI": round(r, 1) if r else None,
+                "נפח X": round(vol_spike, 2) if vol_spike else None,
+                "סיגנלים": ", ".join(flags) or "-",
+            })
+        except Exception:
+            continue
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values("ציון", ascending=False).reset_index(drop=True)
+    return df
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def get_news(ticker, limit=6):
+    """כותרות חדשות אחרונות לטיקר (תומך במבנה הישן והחדש של yfinance)."""
+    if not YF_AVAILABLE:
+        return []
+    try:
+        items = yf.Ticker(ticker).news or []
+    except Exception:
+        return []
+    out = []
+    for it in items[:limit]:
+        c = it.get("content", it) if isinstance(it, dict) else {}
+        title = c.get("title") or (it.get("title") if isinstance(it, dict) else None)
+        if not title:
+            continue
+        url = ""
+        for k in ("canonicalUrl", "clickThroughUrl"):
+            v = c.get(k)
+            if isinstance(v, dict) and v.get("url"):
+                url = v["url"]; break
+        if not url and isinstance(it, dict):
+            url = it.get("link", "")
+        prov = c.get("provider")
+        prov = prov.get("displayName", "") if isinstance(prov, dict) else (it.get("publisher", "") if isinstance(it, dict) else "")
+        t = c.get("pubDate") or c.get("displayTime") or ""
+        out.append({"title": title, "url": url, "provider": prov, "time": str(t)[:10]})
+    return out
+
+
+# ===================================================================
+
 #  מודול 1: תיק מניות
 # ===================================================================
 def tab_portfolio():
@@ -747,6 +869,60 @@ def check_password():
 
 
 # ===================================================================
+#  מודול 5: סורק שוק
+# ===================================================================
+def tab_scanner():
+    st.subheader("🔎 סורק שוק")
+    if not YF_AVAILABLE:
+        st.info("הסורק דורש חיבור לאינטרנט (חבילת yfinance).")
+        return
+    st.caption("⚠️ הסורק מסמן מועמדים בולטים לפי סיגנלים — אלו לא הבטחות. שיקול הדעת תמיד שלך.")
+    if st.button("🔄 רענן נתונים"):
+        st.cache_data.clear()
+        st.rerun()
+
+    # ----- מומנטום סקטורים -----
+    st.markdown("### 📊 מומנטום סקטורים")
+    with st.spinner("טוען נתוני סקטורים..."):
+        sec = scan_sectors()
+    if sec is not None and not sec.empty:
+        render_table(sec, color_cols=["שבוע %", "חודש %", "3 חודשים %"])
+        top = sec.iloc[0]
+        if top["חודש %"] is not None:
+            st.success("🔥 הסקטור החזק החודש: %s (%+.1f%%)" % (top["סקטור"], top["חודש %"]))
+    else:
+        st.warning("לא ניתן לטעון נתוני סקטורים כרגע. נסה 'רענן נתונים'.")
+
+    # ----- סורק מניות -----
+    st.markdown("### 🎯 סורק מניות (רשימת מעקב)")
+    default = ",".join(DEFAULT_WATCHLIST)
+    wl_text = st.text_input("רשימת מעקב — טיקרים מופרדים בפסיק", value=default, key="watchlist_text")
+    tickers = tuple(t.strip().upper() for t in wl_text.split(",") if t.strip())
+    if tickers:
+        with st.spinner("סורק מניות..."):
+            scan = scan_stocks(tickers)
+        if scan is not None and not scan.empty:
+            render_table(scan, color_cols=["מרחק משיא %"])
+            st.caption("**ציון** = כמה סיגנלים חיוביים (0–5): מעל MA50, מעל MA200, RSI חיובי, קרוב לשיא, קפיצת נפח. ככל שגבוה — בולט יותר.")
+        else:
+            st.warning("לא נמצאו נתונים לרשימה. בדוק שהטיקרים תקינים.")
+
+    # ----- חדשות אחרונות -----
+    st.markdown("### 📰 חדשות אחרונות")
+    if tickers:
+        sel = st.selectbox("בחר טיקר לחדשות", tickers, key="news_ticker")
+        with st.spinner("טוען חדשות..."):
+            news = get_news(sel)
+        if news:
+            for n in news:
+                title = "[%s](%s)" % (n["title"], n["url"]) if n["url"] else n["title"]
+                meta = "  \n<small>%s · %s</small>" % (n["provider"] or "—", n["time"] or "")
+                st.markdown("• **%s**%s" % (title, meta), unsafe_allow_html=True)
+        else:
+            st.info("אין חדשות זמינות לטיקר זה כרגע.")
+
+
+# ===================================================================
 #  ראשי
 # ===================================================================
 def main():
@@ -766,9 +942,12 @@ def main():
     if st.session_state.get("flash"):
         st.success(st.session_state.pop("flash"))
 
-    t1, t2, t3, t4 = st.tabs(["📊 תיק מניות", "🔍 ניתוח מניה", "📒 יומן מסחר", "📈 גרפים"])
+    t1, t5, t2, t3, t4 = st.tabs(
+        ["📊 תיק מניות", "🔎 סורק שוק", "🔍 ניתוח מניה", "📒 יומן מסחר", "📈 גרפים"])
     with t1:
         tab_portfolio()
+    with t5:
+        tab_scanner()
     with t2:
         tab_analysis()
     with t3:
