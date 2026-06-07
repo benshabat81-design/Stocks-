@@ -453,11 +453,51 @@ def tab_charts():
 
 
 # ===================================================================
+#  שער סיסמה (Password gate)
+# ===================================================================
+def _expected_password():
+    """הסיסמה נשמרת ב-Secrets של Streamlit (app_password). אם לא הוגדרה - אין נעילה."""
+    try:
+        pw = st.secrets["app_password"]
+        return str(pw) if pw else None
+    except Exception:
+        return None
+
+
+def check_password():
+    """
+    שער כניסה: אם הוגדרה סיסמה ב-Secrets, חוסמים עד שמזינים אותה נכון.
+    אם לא הוגדרה סיסמה כלל - הגישה חופשית (כדי למנוע נעילה בטעות).
+    """
+    expected = _expected_password()
+    if not expected:
+        return True  # לא הוגדרה סיסמה - גישה חופשית
+    if st.session_state.get("auth_ok"):
+        return True
+
+    st.markdown("## 🔒 כניסה מוגנת")
+    st.caption("האפליקציה מוגנת בסיסמה. הזן את הסיסמה כדי להמשיך.")
+    pw = st.text_input("סיסמה", type="password", key="pw_input")
+    if st.button("כניסה"):
+        if pw == expected:
+            st.session_state.auth_ok = True
+            st.rerun()
+        else:
+            st.error("סיסמה שגויה ❌")
+    return False
+
+
+# ===================================================================
 #  ראשי
 # ===================================================================
 def main():
     st.set_page_config(page_title="Stock Tracker Pro", page_icon="📈", layout="wide")
     inject_css()
+
+    # שער סיסמה - רק מי שיודע את הסיסמה ייכנס
+    if not check_password():
+        st.stop()
+
     load_state()
 
     st.title("📈 Stock Tracker Pro")
