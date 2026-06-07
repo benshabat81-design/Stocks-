@@ -183,6 +183,24 @@ def fetch_price(ticker):
         return None, str(exc)[:120]
 
 
+def fetch_quote(ticker):
+    """מחזיר (מחיר, שם חברה, שגיאה) - מהיר, למילוי טופס הפוזיציה."""
+    if not YF_AVAILABLE:
+        return None, "", "מודול המשיכה לא זמין"
+    try:
+        t = yf.Ticker(ticker)
+        info = t.info or {}
+        price = info.get("currentPrice") or info.get("regularMarketPrice")
+        if price is None:
+            price, _ = fetch_price(ticker)
+        name = info.get("shortName") or info.get("longName") or ""
+        if not price:
+            return None, name, "לא נמצא מחיר לטיקר %s" % ticker
+        return round(float(price), 2), name, None
+    except Exception as exc:
+        return None, "", str(exc)[:120]
+
+
 def fetch_fundamentals(ticker):
     """מחזיר (נתונים, שגיאה) - תמונה פונדמנטלית + טכנית רחבה."""
     if not YF_AVAILABLE:
@@ -317,19 +335,43 @@ def tab_portfolio():
 
     st.divider()
 
+    # ניקוי שדות הטופס לאחר הוספה מוצלחת
+    if st.session_state.pop("_clear_pf_form", False):
+        for _k in ("pf_symbol", "pf_name", "pf_shares", "pf_entry", "pf_current", "pf_fetch_tk"):
+            st.session_state.pop(_k, None)
+
     # ----- טופס הזנה -----
     with st.expander("➕ הזנת / עדכון פוזיציה", expanded=not pf):
-        with st.form("pf_form", clear_on_submit=True):
-            f1, f2, f3, f4, f5 = st.columns(5)
-            symbol = f5.text_input("סימבול (AAPL)")
-            name = f4.text_input("שם החברה")
-            shares = f3.text_input("מספר מניות")
-            entry = f2.text_input("מחיר כניסה $")
-            current = f1.text_input("מחיר נוכחי $")
-            b1, b2 = st.columns(2)
-            add = b1.form_submit_button("➕ הוסף / עדכן פוזיציה")
-            if add:
-                _add_position(symbol, name, shares, entry, current)
+        # משיכת מחיר ושם אוטומטית
+        if YF_AVAILABLE:
+            ff1, ff2 = st.columns([3, 1])
+            ftk = ff1.text_input("📥 משיכה אוטומטית — הזן סימבול (לדוגמה AAPL)", key="pf_fetch_tk")
+            ff2.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+            if ff2.button("📥 משוך מחיר ושם", key="pf_fetch_btn"):
+                tk = (ftk or "").strip().upper()
+                if not tk:
+                    st.warning("הזן סימבול תחילה")
+                else:
+                    with st.spinner("מושך נתונים עדכניים..."):
+                        price, cname, err = fetch_quote(tk)
+                    if err:
+                        st.error("שגיאה: %s" % err)
+                    else:
+                        st.session_state["pf_symbol"] = tk
+                        if price is not None:
+                            st.session_state["pf_current"] = str(price)
+                        if cname:
+                            st.session_state["pf_name"] = cname
+                        st.success("✓ נמשך מחיר %s עבור %s. השלם מניות ומחיר כניסה, ולחץ הוסף." % (price, tk))
+
+        f1, f2, f3, f4, f5 = st.columns(5)
+        symbol = f5.text_input("סימבול (AAPL)", key="pf_symbol")
+        name = f4.text_input("שם החברה", key="pf_name")
+        shares = f3.text_input("מספר מניות", key="pf_shares")
+        entry = f2.text_input("מחיר כניסה $", key="pf_entry")
+        current = f1.text_input("מחיר נוכחי $", key="pf_current")
+        if st.button("➕ הוסף / עדכן פוזיציה"):
+            _add_position(symbol, name, shares, entry, current)
 
     # ----- עדכון מחירים מהאינטרנט -----
     if pf and YF_AVAILABLE:
@@ -431,6 +473,7 @@ def _add_position(symbol, name, shares, entry, current):
     save_json(PORTFOLIO_FILE, st.session_state.portfolio)
     log_history()
     st.session_state.flash = "הפוזיציה %s נשמרה ✓" % symbol
+    st.session_state["_clear_pf_form"] = True
     st.rerun()
 
 
