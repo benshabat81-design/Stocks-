@@ -15,6 +15,7 @@ Stock Tracker Pro - Web Edition
 
 import os
 import json
+import html
 import datetime
 from collections import Counter
 
@@ -28,6 +29,22 @@ try:
     YF_AVAILABLE = True
 except Exception:
     YF_AVAILABLE = False
+
+# ניתוח חכם של חדשות (אופציונלי) - Claude API
+try:
+    import anthropic
+    from pydantic import BaseModel, Field
+    ANTHROPIC_AVAILABLE = True
+
+    class NewsAnalysis(BaseModel):
+        related_tickers: list[str] = Field(description="רשימת טיקרים של מניות הקשורות לכתבה")
+        intro: str = Field(description="משפט הקדמה קצר בעברית")
+        sentiment: str = Field(description="האם הכתבה חיובית / שלילית / ניטרלית למניות הקשורות")
+        summary: str = Field(description="סיכום תמציתי של הכתבה בעברית")
+        recommendation: str = Field(description="המלצת הסוכן בעברית לגבי הכותרת")
+        urgency: int = Field(description="ציון חשיבות/דחיפות מ-1 (לא דחוף) עד 5 (הכי דחוף)")
+except Exception:
+    ANTHROPIC_AVAILABLE = False
 
 
 # ===================================================================
@@ -432,8 +449,100 @@ def get_news(ticker, limit=6):
         prov = c.get("provider")
         prov = prov.get("displayName", "") if isinstance(prov, dict) else (it.get("publisher", "") if isinstance(it, dict) else "")
         t = c.get("pubDate") or c.get("displayTime") or ""
-        out.append({"title": title, "url": url, "provider": prov, "time": str(t)[:10]})
+        summary = c.get("summary") or c.get("description") or (it.get("summary") if isinstance(it, dict) else "") or ""
+        out.append({"title": title, "url": url, "provider": prov,
+                    "time": str(t)[:10], "summary": summary})
     return out
+
+
+# ----- ניתוח חדשות חכם (Claude API) -----
+NEWS_SYSTEM = (
+    "אתה אנליסט שוק הון מנוסה. תקבל כותרת ותקציר של כתבת חדשות על מניות וול-סטריט. "
+    "נתח אותה והחזר בעברית: טיקרים קשורים, משפט הקדמה, האם היא חיובית/שלילית/ניטרלית, "
+    "סיכום תמציתי, המלצת סוכן מעשית לגבי הכותרת, וציון חשיבות/דחיפות מ-1 (לא דחוף) עד 5 "
+    "(חדשות מהותית שמזיזה שוק). ענה תמציתי וענייני, בעברית בלבד."
+)
+
+
+def _anthropic_key():
+    try:
+        k = st.secrets["ANTHROPIC_API_KEY"]
+        return str(k) if k else None
+    except Exception:
+        return None
+
+
+def _anthropic_model():
+    try:
+        m = st.secrets["ANTHROPIC_MODEL"]
+        return str(m) if m else "claude-opus-4-8"
+    except Exception:
+        return "claude-opus-4-8"
+
+
+def analyze_news_item(title, summary):
+    """מנתח כתבה בודדת ב-Claude ומחזיר (dict, שגיאה)."""
+    if not ANTHROPIC_AVAILABLE:
+        return None, "מודול ה-AI אינו מותקן"
+    key = _anthropic_key()
+    if not key:
+        return None, "לא הוגדר מפתח API"
+    try:
+        client = anthropic.Anthropic(api_key=key)
+        resp = client.messages.parse(
+            model=_anthropic_model(),
+            max_tokens=1024,
+            system=NEWS_SYSTEM,
+            messages=[{
+                "role": "user",
+                "content": "כותרת הכתבה: %s\n\nתקציר/תיאור: %s" % (title, summary or "(אין תקציר)"),
+            }],
+            output_format=NewsAnalysis,
+        )
+        a = resp.parsed_output
+        return {
+            "tickers": list(a.related_tickers or []),
+            "intro": a.intro,
+            "sentiment": a.sentiment,
+            "summary": a.summary,
+            "recommendation": a.recommendation,
+            "urgency": max(1, min(5, int(a.urgency))),
+        }, None
+    except anthropic.AuthenticationError:
+        return None, "מפתח ה-API אינו תקין"
+    except anthropic.RateLimitError:
+        return None, "חריגה ממכסת הבקשות — נסה שוב מאוחר יותר"
+    except Exception as exc:
+        return None, str(exc)[:160]
+
+
+def render_news_analysis(a):
+    """מציג את ניתוח ה-AI של כתבה בעברית, מימין לשמאל."""
+    urg = a["urgency"]
+    ucolor = COLORS["red"] if urg >= 4 else (COLORS["accent"] if urg == 3 else COLORS["muted"])
+    sent = a["sentiment"]
+    scolor = COLORS["green"] if "חיוב" in sent else (COLORS["red"] if "שליל" in sent else COLORS["muted"])
+    tickers = ", ".join(a["tickers"]) if a["tickers"] else "—"
+
+    def esc(x):
+        return html.escape(str(x))
+
+    dots = "●" * urg + "○" * (5 - urg)
+    block = (
+        '<div style="direction:rtl; background:%s; border-right:4px solid %s;'
+        ' padding:10px 12px; border-radius:8px; margin:2px 0 12px 0; font-size:13px;'
+        ' color:%s; line-height:1.7;">'
+        '<div>🎯 <b>טיקרים קשורים:</b> %s</div>'
+        '<div>📝 %s</div>'
+        '<div>סנטימנט: <b style="color:%s">%s</b></div>'
+        '<div><b>סיכום:</b> %s</div>'
+        '<div>🤖 <b>המלצת הסוכן:</b> %s</div>'
+        '<div>🚨 <b>חשיבות:</b> <span style="color:%s">%s (%d/5)</span></div>'
+        '</div>'
+    ) % (COLORS["surface"], ucolor, COLORS["text"], esc(tickers), esc(a["intro"]),
+         scolor, esc(sent), esc(a["summary"]), esc(a["recommendation"]),
+         ucolor, dots, urg)
+    st.markdown(block, unsafe_allow_html=True)
 
 
 # ===================================================================
@@ -911,13 +1020,30 @@ def tab_scanner():
     st.markdown("### 📰 חדשות אחרונות")
     if tickers:
         sel = st.selectbox("בחר טיקר לחדשות", tickers, key="news_ticker")
+        ai_on = False
+        if ANTHROPIC_AVAILABLE and _anthropic_key():
+            ai_on = st.toggle("🤖 הוסף ניתוח חכם (AI) בעברית מתחת לכל כתבה", value=False, key="news_ai_toggle")
+        elif ANTHROPIC_AVAILABLE:
+            st.caption("💡 לניתוח AI בעברית: הוסף ANTHROPIC_API_KEY ב-Settings → Secrets של Streamlit.")
         with st.spinner("טוען חדשות..."):
             news = get_news(sel)
         if news:
+            ai_cache = st.session_state.setdefault("news_ai_cache", {})
             for n in news:
                 title = "[%s](%s)" % (n["title"], n["url"]) if n["url"] else n["title"]
                 meta = "  \n<small>%s · %s</small>" % (n["provider"] or "—", n["time"] or "")
                 st.markdown("• **%s**%s" % (title, meta), unsafe_allow_html=True)
+                if ai_on:
+                    ckey = n["title"]
+                    if ckey not in ai_cache:
+                        with st.spinner("מנתח כתבה ב-AI..."):
+                            ai_cache[ckey] = analyze_news_item(n["title"], n.get("summary", ""))
+                    data, err = ai_cache[ckey]
+                    if data:
+                        render_news_analysis(data)
+                    else:
+                        st.caption("⚠️ ניתוח AI לא זמין: %s" % err)
+                st.markdown("<hr style='margin:6px 0; border-color:%s'>" % COLORS["surface"], unsafe_allow_html=True)
         else:
             st.info("אין חדשות זמינות לטיקר זה כרגע.")
 
