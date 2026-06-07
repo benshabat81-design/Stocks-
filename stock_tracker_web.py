@@ -22,6 +22,13 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
+# משיכת נתונים עדכניים מהאינטרנט (אופציונלי) - yfinance / Yahoo Finance
+try:
+    import yfinance as yf
+    YF_AVAILABLE = True
+except Exception:
+    YF_AVAILABLE = False
+
 
 # ===================================================================
 #  קבועים (Constants)
@@ -124,6 +131,122 @@ def num(x):
         return None
 
 
+# ===================================================================
+#  משיכת נתונים מהאינטרנט (Yahoo Finance / yfinance)
+# ===================================================================
+# רשימת השדות הפונדמנטליים והטכניים (תואם ללשונית הניתוח)
+FUND_KEYS = ["revenue_growth", "gross_margin", "net_margin", "fcf", "pe",
+             "forward_pe", "ev_ebitda", "peg", "debt_equity", "roe", "insider"]
+TECH_KEYS = ["price", "ma50", "ma150", "ma200", "rsi", "atr", "vol_ratio",
+             "high52", "low52"]
+
+
+def _rsi(close, period=14):
+    delta = close.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+    avg_gain = gain.ewm(alpha=1 / period, min_periods=period).mean()
+    avg_loss = loss.ewm(alpha=1 / period, min_periods=period).mean()
+    rs = avg_gain / avg_loss.replace(0, float("nan"))
+    rsi = 100 - 100 / (1 + rs)
+    return float(rsi.iloc[-1])
+
+
+def _atr_pct(h, price, period=14):
+    high, low, close = h["High"], h["Low"], h["Close"]
+    prev = close.shift(1)
+    tr = pd.concat([(high - low), (high - prev).abs(), (low - prev).abs()], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1 / period, min_periods=period).mean().iloc[-1]
+    return float(atr) / price * 100 if price else None
+
+
+def fetch_price(ticker):
+    """מחזיר (מחיר, שגיאה) - מחיר נוכחי בלבד, מהיר."""
+    if not YF_AVAILABLE:
+        return None, "מודול המשיכה לא זמין"
+    try:
+        t = yf.Ticker(ticker)
+        price = None
+        try:
+            fi = t.fast_info
+            price = fi.get("lastPrice") if hasattr(fi, "get") else getattr(fi, "last_price", None)
+        except Exception:
+            price = None
+        if price is None:
+            h = t.history(period="5d")
+            if len(h):
+                price = float(h["Close"].iloc[-1])
+        if price:
+            return round(float(price), 2), None
+        return None, "לא נמצא מחיר לטיקר %s" % ticker
+    except Exception as exc:
+        return None, str(exc)[:120]
+
+
+def fetch_fundamentals(ticker):
+    """מחזיר (נתונים, שגיאה) - תמונה פונדמנטלית + טכנית רחבה."""
+    if not YF_AVAILABLE:
+        return None, "מודול המשיכה לא זמין"
+    try:
+        t = yf.Ticker(ticker)
+        info = t.info or {}
+        h = t.history(period="1y")
+        price = info.get("currentPrice") or info.get("regularMarketPrice")
+        if price is None and len(h):
+            price = float(h["Close"].iloc[-1])
+        if not price and not info.get("trailingPE"):
+            return None, "לא נמצאו נתונים לטיקר %s (אולי שגוי?)" % ticker
+
+        def pct(v):
+            return round(v * 100, 2) if isinstance(v, (int, float)) else None
+
+        def r2(v):
+            return round(v, 2) if isinstance(v, (int, float)) else None
+
+        de = info.get("debtToEquity")
+        data = {
+            "revenue_growth": pct(info.get("revenueGrowth")),
+            "gross_margin": pct(info.get("grossMargins")),
+            "net_margin": pct(info.get("profitMargins")),
+            "fcf": info.get("freeCashflow"),
+            "pe": r2(info.get("trailingPE")),
+            "forward_pe": r2(info.get("forwardPE")),
+            "ev_ebitda": r2(info.get("enterpriseToEbitda")),
+            "peg": r2(info.get("trailingPegRatio") or info.get("pegRatio")),
+            "debt_equity": r2(de / 100) if isinstance(de, (int, float)) else None,
+            "roe": pct(info.get("returnOnEquity")),
+            "insider": pct(info.get("heldPercentInsiders")),
+            "price": r2(price),
+            "ma50": r2(info.get("fiftyDayAverage")),
+            "ma200": r2(info.get("twoHundredDayAverage")),
+            "high52": r2(info.get("fiftyTwoWeekHigh")),
+            "low52": r2(info.get("fiftyTwoWeekLow")),
+            "ma150": None, "rsi": None, "atr": None, "vol_ratio": None,
+        }
+        if len(h) >= 150:
+            data["ma150"] = r2(float(h["Close"].rolling(150).mean().iloc[-1]))
+        if len(h) >= 30:
+            try:
+                data["rsi"] = r2(_rsi(h["Close"]))
+            except Exception:
+                pass
+            try:
+                data["atr"] = r2(_atr_pct(h, price))
+            except Exception:
+                pass
+            try:
+                vol = h["Volume"]
+                avg14 = float(vol.iloc[-15:-1].mean())
+                data["vol_ratio"] = round(float(vol.iloc[-1]) / avg14, 2) if avg14 else None
+            except Exception:
+                pass
+        # שם החברה (בונוס)
+        data["_name"] = info.get("shortName") or info.get("longName") or ""
+        return data, None
+    except Exception as exc:
+        return None, str(exc)[:120]
+
+
 def _fmt_cell(val):
     """פורמט תא בטבלה: מספרים עם פסיקים, ריק -> מקף."""
     if val is None:
@@ -207,6 +330,28 @@ def tab_portfolio():
             add = b1.form_submit_button("➕ הוסף / עדכן פוזיציה")
             if add:
                 _add_position(symbol, name, shares, entry, current)
+
+    # ----- עדכון מחירים מהאינטרנט -----
+    if pf and YF_AVAILABLE:
+        u1, u2 = st.columns([3, 1])
+        u1.caption("עדכון אוטומטי של המחיר הנוכחי לכל הפוזיציות מ-Yahoo Finance")
+        if u2.button("📥 עדכן מחירים"):
+            updated, failed = 0, []
+            with st.spinner("מושך מחירים עדכניים..."):
+                for p in st.session_state.portfolio:
+                    price, err = fetch_price(p["symbol"])
+                    if price:
+                        p["current_price"] = price
+                        updated += 1
+                    else:
+                        failed.append(p["symbol"])
+            save_json(PORTFOLIO_FILE, st.session_state.portfolio)
+            log_history()
+            msg = "עודכנו %d מחירים ✓" % updated
+            if failed:
+                msg += " (לא נמצאו: %s)" % ", ".join(failed)
+            st.session_state.flash = msg
+            st.rerun()
 
     # ----- מחיקה -----
     if pf:
@@ -294,8 +439,35 @@ def _add_position(symbol, name, shares, entry, current):
 # ===================================================================
 def tab_analysis():
     st.subheader("🔍 ניתוח מניה")
+
+    # ----- משיכת נתונים עדכניים מהאינטרנט -----
+    if YF_AVAILABLE:
+        fc1, fc2 = st.columns([3, 1])
+        fetch_tk = fc1.text_input("📥 משיכת נתונים אוטומטית — הזן טיקר (לדוגמה AAPL)", key="fetch_ticker_an")
+        fc2.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        if fc2.button("📥 משוך נתונים", key="fetch_an_btn"):
+            tk = (fetch_tk or "").strip().upper()
+            if not tk:
+                st.warning("הזן טיקר תחילה")
+            else:
+                with st.spinner("מושך נתונים עדכניים מ-Yahoo Finance..."):
+                    data, err = fetch_fundamentals(tk)
+                if err:
+                    st.error("שגיאה במשיכה: %s" % err)
+                else:
+                    st.session_state["analysis_symbol"] = tk
+                    for k in FUND_KEYS:
+                        v = data.get(k)
+                        st.session_state["fa_%s" % k] = "" if v is None else str(v)
+                    for k in TECH_KEYS:
+                        v = data.get(k)
+                        st.session_state["ta_%s" % k] = "" if v is None else str(v)
+                    st.success("✓ הנתונים של %s נמשכו ומולאו אוטומטית. בדוק, השלם תזה, ושמור." % tk)
+    else:
+        st.info("משיכת נתונים אוטומטית אינה זמינה (חבילת yfinance חסרה).")
+
     with st.form("analysis_form"):
-        symbol = st.text_input("סימבול מניה לניתוח")
+        symbol = st.text_input("סימבול מניה לניתוח", key="analysis_symbol")
 
         st.markdown("##### סקציה A — ניתוח פונדמנטלי")
         fa = {}
