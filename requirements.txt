@@ -3,4 +3,4 @@ pandas
 plotly
 matplotlib
 yfinance
-anthropic
+google-genai

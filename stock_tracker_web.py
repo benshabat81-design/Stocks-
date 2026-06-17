@@ -30,21 +30,12 @@ try:
 except Exception:
     YF_AVAILABLE = False
 
-# ניתוח חכם של חדשות (אופציונלי) - Claude API
+# ניתוח חכם של חדשות (אופציונלי) - Google Gemini API (חינמי)
 try:
-    import anthropic
-    from pydantic import BaseModel, Field
-    ANTHROPIC_AVAILABLE = True
-
-    class NewsAnalysis(BaseModel):
-        related_tickers: list[str] = Field(description="רשימת טיקרים של מניות הקשורות לכתבה")
-        intro: str = Field(description="משפט הקדמה קצר בעברית")
-        sentiment: str = Field(description="האם הכתבה חיובית / שלילית / ניטרלית למניות הקשורות")
-        summary: str = Field(description="סיכום תמציתי של הכתבה בעברית")
-        recommendation: str = Field(description="המלצת הסוכן בעברית לגבי הכותרת")
-        urgency: int = Field(description="ציון חשיבות/דחיפות מ-1 (לא דחוף) עד 5 (הכי דחוף)")
+    from google import genai as google_genai
+    GEMINI_AVAILABLE = True
 except Exception:
-    ANTHROPIC_AVAILABLE = False
+    GEMINI_AVAILABLE = False
 
 
 # ===================================================================
@@ -455,65 +446,73 @@ def get_news(ticker, limit=6):
     return out
 
 
-# ----- ניתוח חדשות חכם (Claude API) -----
+# ----- ניתוח חדשות חכם (Google Gemini - חינמי) -----
 NEWS_SYSTEM = (
     "אתה אנליסט שוק הון מנוסה. תקבל כותרת ותקציר של כתבת חדשות על מניות וול-סטריט. "
-    "נתח אותה והחזר בעברית: טיקרים קשורים, משפט הקדמה, האם היא חיובית/שלילית/ניטרלית, "
-    "סיכום תמציתי, המלצת סוכן מעשית לגבי הכותרת, וציון חשיבות/דחיפות מ-1 (לא דחוף) עד 5 "
-    "(חדשות מהותית שמזיזה שוק). ענה תמציתי וענייני, בעברית בלבד."
+    "נתח אותה וענה בעברית בלבד, תמציתי וענייני. "
+    "החזר אך ורק אובייקט JSON תקין (בלי טקסט נוסף, בלי סימוני קוד) עם המפתחות הבאים: "
+    '"tickers" (רשימת מחרוזות של טיקרים קשורים), '
+    '"intro" (משפט הקדמה קצר בעברית), '
+    '"sentiment" (אחת מהמילים: חיובית / שלילית / ניטרלית), '
+    '"summary" (סיכום תמציתי בעברית), '
+    '"recommendation" (המלצת הסוכן בעברית לגבי הכותרת), '
+    '"urgency" (מספר שלם מ-1 שאינו דחוף עד 5 שמזיז שוק).'
 )
 
 
-def _anthropic_key():
+def _gemini_key():
     try:
-        k = st.secrets["ANTHROPIC_API_KEY"]
+        k = st.secrets["GEMINI_API_KEY"]
         return str(k) if k else None
     except Exception:
         return None
 
 
-def _anthropic_model():
+def _gemini_model():
     try:
-        m = st.secrets["ANTHROPIC_MODEL"]
-        return str(m) if m else "claude-opus-4-8"
+        m = st.secrets["GEMINI_MODEL"]
+        return str(m) if m else "gemini-2.0-flash"
     except Exception:
-        return "claude-opus-4-8"
+        return "gemini-2.0-flash"
 
 
 def analyze_news_item(title, summary):
-    """מנתח כתבה בודדת ב-Claude ומחזיר (dict, שגיאה)."""
-    if not ANTHROPIC_AVAILABLE:
+    """מנתח כתבה בודדת ב-Gemini (חינמי) ומחזיר (dict, שגיאה)."""
+    if not GEMINI_AVAILABLE:
         return None, "מודול ה-AI אינו מותקן"
-    key = _anthropic_key()
+    key = _gemini_key()
     if not key:
         return None, "לא הוגדר מפתח API"
     try:
-        client = anthropic.Anthropic(api_key=key)
-        resp = client.messages.parse(
-            model=_anthropic_model(),
-            max_tokens=1024,
-            system=NEWS_SYSTEM,
-            messages=[{
-                "role": "user",
-                "content": "כותרת הכתבה: %s\n\nתקציר/תיאור: %s" % (title, summary or "(אין תקציר)"),
-            }],
-            output_format=NewsAnalysis,
+        client = google_genai.Client(api_key=key)
+        prompt = "כותרת הכתבה: %s\n\nתקציר/תיאור: %s" % (title, summary or "(אין תקציר)")
+        resp = client.models.generate_content(
+            model=_gemini_model(),
+            contents=prompt,
+            config={
+                "system_instruction": NEWS_SYSTEM,
+                "response_mime_type": "application/json",
+                "temperature": 0.3,
+                "max_output_tokens": 1024,
+            },
         )
-        a = resp.parsed_output
+        obj = json.loads(resp.text)
         return {
-            "tickers": list(a.related_tickers or []),
-            "intro": a.intro,
-            "sentiment": a.sentiment,
-            "summary": a.summary,
-            "recommendation": a.recommendation,
-            "urgency": max(1, min(5, int(a.urgency))),
+            "tickers": list(obj.get("tickers") or []),
+            "intro": str(obj.get("intro", "")),
+            "sentiment": str(obj.get("sentiment", "")),
+            "summary": str(obj.get("summary", "")),
+            "recommendation": str(obj.get("recommendation", "")),
+            "urgency": max(1, min(5, int(obj.get("urgency") or 3))),
         }, None
-    except anthropic.AuthenticationError:
-        return None, "מפתח ה-API אינו תקין"
-    except anthropic.RateLimitError:
-        return None, "חריגה ממכסת הבקשות — נסה שוב מאוחר יותר"
     except Exception as exc:
-        return None, str(exc)[:160]
+        msg = str(exc)
+        low = msg.lower()
+        if "api key" in low or "api_key" in low or "permission" in low or "invalid" in low and "key" in low:
+            return None, "מפתח ה-API אינו תקין"
+        if "quota" in low or "rate" in low or "429" in msg or "resource_exhausted" in low:
+            return None, "חריגה ממכסת הבקשות — נסה שוב מאוחר יותר"
+        return None, msg[:160]
 
 
 def render_news_analysis(a):
@@ -1021,10 +1020,10 @@ def tab_scanner():
     if tickers:
         sel = st.selectbox("בחר טיקר לחדשות", tickers, key="news_ticker")
         ai_on = False
-        if ANTHROPIC_AVAILABLE and _anthropic_key():
+        if GEMINI_AVAILABLE and _gemini_key():
             ai_on = st.toggle("🤖 הוסף ניתוח חכם (AI) בעברית מתחת לכל כתבה", value=False, key="news_ai_toggle")
-        elif ANTHROPIC_AVAILABLE:
-            st.caption("💡 לניתוח AI בעברית: הוסף ANTHROPIC_API_KEY ב-Settings → Secrets של Streamlit.")
+        elif GEMINI_AVAILABLE:
+            st.caption("💡 לניתוח AI חינמי בעברית: הוסף GEMINI_API_KEY ב-Settings → Secrets של Streamlit (מפתח חינם מ-aistudio.google.com).")
         with st.spinner("טוען חדשות..."):
             news = get_news(sel)
         if news:
